@@ -65,6 +65,14 @@ each model forecast:
   --fixture .\fixtures\match.json --interactive --seed 42
 ```
 
+In interactive mode, choose which team bats first, then set each batting order
+by entering the XI numbers in the order you want (or press Enter to keep the
+fixture order). At the start of each over, choose a bowler from the numbered
+eligible-bowler list. Names are displayed for selection; you do not need to
+type them. The simulator prevents consecutive overs and enforces the four-over
+limit. Bowling forecasts use your choices for completed and current overs and
+the model's projected schedule for future overs.
+
 Enter `0`–`6` for legal-delivery team runs, `W[:<runs>]` for a wicket,
 `WD:<total runs>[:<completed runs>]` or
 `NB:<total runs>[:<completed runs>]` for an extra delivery, or `q` to stop.
@@ -108,6 +116,17 @@ debut-player average. Player names are resolved against player names present
 in deliveries strictly before the fixture date; an ambiguous historical name
 produces an error rather than selecting an arbitrary player. Names that have
 not appeared in that history are treated as debut players.
+To resolve an ambiguous name, add a `player_ids` object to that team's lineup,
+mapping the displayed name to its historical player ID. The simulator verifies
+that the supplied ID was associated with that name before the fixture date.
+
+For example, `fixtures/england_vs_india_2025-01-22.json` uses the actual
+England and India XIs from their January 22, 2025 T20I at Eden Gardens:
+
+```powershell
+.\cricenv\Scripts\python.exe .\run_simulator.py `
+  --fixture .\fixtures\england_vs_india_2025-01-22.json --seed 42
+```
 
 ## Simulate a match or continue from a game state
 
@@ -195,3 +214,110 @@ seen during training. Team coverage is reported separately; these comparisons
 are diagnostic, not proof of betting value. Treat score-distribution gaps as
 model limitations to investigate, and do not infer profitability without
 odds-based, leakage-safe backtests across multiple time periods.
+
+## Ball-by-ball win probability: how to use it
+
+Use the replay to explore how the match state changes the model's view of the
+game. It answers questions such as:
+
+- Which deliveries coincided with the largest swings in the first-batting
+  team's estimated chance of winning?
+- How did a wicket, boundary, or quiet over change that forecast?
+- How did the projected first-innings score develop, and how close was it to
+  the actual total?
+- Where did this match's forecast agree with the result, and where did it
+  miss?
+
+This is a **retrospective model-exploration tool**: it replays a completed
+match, then asks what the model would forecast from each observed score,
+wicket, and ball count. It is useful for finding moments to investigate,
+explaining the model's response to match events, and spotting forecast
+limitations. A single match is an example, not evidence that the model is
+accurate across matches.
+
+### Step 1: Prepare the data
+
+From the repository root, run the pipeline. It downloads the Cricsheet archive
+if needed, processes the matches, fits and saves the model, and runs the
+held-out evaluation:
+
+```powershell
+.\cricenv\Scripts\python.exe .\run_pipeline.py
+```
+
+This also creates the processed files under `data/processed/`, which the
+replay needs. To download a fresh archive instead of reusing the existing raw
+data, add `--refresh-data`.
+
+### Step 2: Replay the latest supported match
+
+```powershell
+.\cricenv\Scripts\python.exe -m src.win_probability --simulations 200
+```
+
+By default, this selects the latest completed match with delivery data for
+both innings on or after `2025-01-01`. The model is trained only on matches
+before that date; using later matches for the replay keeps the example
+separate from the model's training data.
+
+### Step 3: Choose a particular match (optional)
+
+List recent held-out matches and their Cricsheet IDs:
+
+```powershell
+.\cricenv\Scripts\python.exe -c "import pandas as pd; m=pd.read_parquet(r'data\processed\matches.parquet'); m['date']=pd.to_datetime(m['date']); m=m.loc[(m['date'] >= '2025-01-01') & m['winner'].notna() & ~m['has_super_over'].fillna(False), ['match_id','date','team_1','team_2','winner']]; print(m.sort_values('date').tail(10).to_string(index=False))"
+```
+
+Pass the desired ID to the replay:
+
+```powershell
+.\cricenv\Scripts\python.exe -m src.win_probability --match-id "MATCH_ID" --simulations 500
+```
+
+Only completed matches with both innings are supported. Matches decided by a
+super over are not supported.
+
+### Step 4: Read the outputs
+
+The replay creates `results/win_probability/` with:
+
+- `win_probability_timeline.png` — the first-batting team's estimated win
+  probability after each delivery. The dashed line marks 50%, and the
+  vertical divider marks the start of the second innings.
+- `first_innings_projection.png` — the actual score so far alongside the
+  model's projected final-score median and 10th–90th percentile range.
+- `ball_by_ball.csv` — one row per delivery, including the score and wickets,
+  before/after win probabilities, probability change, and first-innings score
+  projection.
+
+The command also prints the five largest absolute probability swings to help
+you find moments to inspect. These swings are changes between adjacent
+forecasts; they do not establish that a delivery caused the eventual result.
+
+### Step 5: Adjust the run
+
+`--simulations` controls the number of simulated remaining matches at each
+delivery. More simulations reduce Monte Carlo noise but take longer. The
+default is 200; start lower for a quick check or raise it for a smoother
+visualization. Use `--seed` to reproduce the same simulation sample, or
+`--output-dir` to save the CSV and charts somewhere else:
+
+```powershell
+.\cricenv\Scripts\python.exe -m src.win_probability `
+  --match-id "MATCH_ID" --simulations 1000 --seed 42 `
+  --output-dir .\results\my_match_replay
+```
+
+### What the forecast includes (and omits)
+
+The win estimate is the fraction of simulated outcomes in which the
+first-batting team wins, counting a simulated tie as half a win. It starts from
+the observed match state and simulates the remaining innings. Team and venue
+effects are used when the fitted model has profiles for them. The replay does
+not use batter or bowler identities, recent player form, or bowling plans.
+
+The shaded win-probability band is an approximate 95% **Monte Carlo sampling
+interval**; it describes variation from the finite simulation count, not all
+sources of model uncertainty. These retrospective charts are for model
+exploration, not betting advice, and do not by themselves demonstrate
+calibrated or reliable win probabilities.

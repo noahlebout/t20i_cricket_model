@@ -1,0 +1,57 @@
+{
+  "team1": "England",
+  "team2": "India",
+  "venue": "Eden Gardens, Kolkata",
+  "match_date": "2025-01-22",
+  "batting_first": "team1",
+  "lineups": {
+    "team1": {
+      "batting_order": [
+        "PD Salt",
+        "BM Duckett",
+        "JC Buttler",
+        "HC Brook",
+        "LS Livingstone",
+        "JG Bethell",
+        "J Overton",
+        "AAP Atkinson",
+        "JC Archer",
+        "AU Rashid",
+        "MA Wood"
+      ],
+      "bowlers": [
+        "JC Archer",
+        "AAP Atkinson",
+        "MA Wood",
+        "AU Rashid",
+        "J Overton",
+        "LS Livingstone"
+      ]
+    },
+    "team2": {
+      "batting_order": [
+        "SV Samson",
+        "Abhishek Sharma",
+        "SA Yadav",
+        "Tilak Varma",
+        "HH Pandya",
+        "RK Singh",
+        "Nithish Kumar Reddy",
+        "AR Patel",
+        "Ravi Bishnoi",
+        "Arshdeep Singh",
+        "CV Varun"
+      ],
+      "bowlers": [
+        "Arshdeep Singh",
+        "HH Pandya",
+        "CV Varun",
+        "AR Patel",
+        "Ravi Bishnoi"
+      ],
+      "player_ids": {
+        "RK Singh": "0a509d6b"
+      }
+    }
+  }
+}

@@ -7,6 +7,8 @@ import json
 import sys
 from collections import Counter
 from datetime import date
+from functools import cache
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +28,7 @@ def _resolve_player_ids(
     matches: pd.DataFrame,
     *,
     as_of_date: pd.Timestamp,
+    player_id_overrides: dict[str, str] | None = None,
 ) -> list[str]:
     known_names: dict[str, set[str]] = {}
     eligible_ids = matches.loc[
@@ -43,6 +46,15 @@ def _resolve_player_ids(
     resolved: list[str] = []
     for name in player_names:
         matches = known_names.get(name.strip().casefold(), set())
+        override = (player_id_overrides or {}).get(name)
+        if override is not None:
+            if override not in matches:
+                raise ValueError(
+                    f"Player ID override for {name!r} must match one of its "
+                    "historical player IDs"
+                )
+            resolved.append(override)
+            continue
         if len(matches) > 1:
             raise ValueError(
                 f"Player name {name!r} matches multiple historical player IDs; use a unique name"
@@ -54,6 +66,29 @@ def _resolve_player_ids(
     if len(set(resolved)) != len(resolved):
         raise ValueError("Each lineup must contain unique players")
     return resolved
+
+
+def _player_id_overrides(
+    value: Any,
+    field: str,
+    player_names: list[str],
+) -> dict[str, str]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise TypeError(f"{field} must be an object mapping player names to historical IDs")
+    names_by_key = {name.casefold(): name for name in player_names}
+    overrides: dict[str, str] = {}
+    for name, player_id in value.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{field} keys must be non-empty player names")
+        if not isinstance(player_id, str) or not player_id.strip():
+            raise ValueError(f"{field} values must be non-empty player IDs")
+        resolved_name = names_by_key.get(name.strip().casefold())
+        if resolved_name is None:
+            raise ValueError(f"{field} player {name!r} is not in the batting_order")
+        overrides[resolved_name] = player_id.strip()
+    return overrides
 
 
 def _required_names(value: Any, field: str, count: int) -> list[str]:
@@ -80,6 +115,113 @@ def _bowling_candidates(value: Any, field: str, batting_order: list[str]) -> lis
     if any(name.casefold() not in batting_names for name in candidates):
         raise ValueError(f"{field} must be selected from that team's batting_order")
     return candidates
+
+
+def _parse_batting_order(value: str, player_names: list[str]) -> list[str]:
+    if not value.strip():
+        return player_names.copy()
+    try:
+        positions = [int(item.strip()) for item in value.split(",")]
+    except ValueError as exc:
+        raise ValueError("enter comma-separated lineup numbers, or press Enter") from exc
+    if len(positions) != len(player_names) or set(positions) != set(
+        range(1, len(player_names) + 1)
+    ):
+        raise ValueError(
+            f"enter each lineup number from 1 to {len(player_names)} exactly once"
+        )
+    return [player_names[position - 1] for position in positions]
+
+
+def _prompt_batting_order(team_name: str, player_names: list[str]) -> list[str]:
+    print(f"\n{team_name} XI:")
+    for index, player_name in enumerate(player_names, start=1):
+        print(f"  {index}. {player_name}")
+    while True:
+        try:
+            value = input(
+                "Batting order (enter XI numbers in order, or press Enter to keep it): "
+            )
+            return _parse_batting_order(value, player_names)
+        except ValueError as exc:
+            print(f"Invalid batting order: {exc}")
+
+
+def _prompt_batting_first(team1: str, team2: str) -> str:
+    while True:
+        choice = input(f"Who bats first? 1. {team1}  2. {team2} [1/2]: ").strip()
+        if choice == "1":
+            return "team1"
+        if choice == "2":
+            return "team2"
+        print("Enter 1 or 2.")
+
+
+def _project_bowling_schedule(
+    candidate_ids: list[str],
+    preferred_schedule: tuple[str, ...],
+    selected_overs: list[str],
+) -> tuple[str, ...]:
+    total_overs = simulator.MAX_LEGAL_BALLS // 6
+    if (
+        not candidate_ids
+        or len(set(candidate_ids)) != len(candidate_ids)
+        or len(selected_overs) > total_overs
+        or any(bowler not in candidate_ids for bowler in selected_overs)
+    ):
+        raise ValueError("invalid bowling candidates or selected overs")
+    selected_counts = Counter(selected_overs)
+    if (
+        max(selected_counts.values(), default=0) > 4
+        or any(left == right for left, right in pairwise(selected_overs))
+    ):
+        raise ValueError("selected overs already break bowling allocation rules")
+
+    @cache
+    def complete(
+        over_index: int,
+        previous: str | None,
+        counts: tuple[int, ...],
+    ) -> tuple[str, ...] | None:
+        if over_index == total_overs:
+            return ()
+        preferred = (
+            preferred_schedule[over_index]
+            if over_index < len(preferred_schedule)
+            else None
+        )
+        available_indices = [
+            index
+            for index, player_id in enumerate(candidate_ids)
+            if player_id != previous and counts[index] < 4
+        ]
+        available_indices.sort(
+            key=lambda index: (
+                candidate_ids[index] != preferred,
+                counts[index],
+                index,
+            )
+        )
+        for index in available_indices:
+            next_counts = list(counts)
+            next_counts[index] += 1
+            rest = complete(
+                over_index + 1,
+                candidate_ids[index],
+                tuple(next_counts),
+            )
+            if rest is not None:
+                return (candidate_ids[index], *rest)
+        return None
+
+    completion = complete(
+        len(selected_overs),
+        selected_overs[-1] if selected_overs else None,
+        tuple(selected_counts[player_id] for player_id in candidate_ids),
+    )
+    if completion is None:
+        raise ValueError("bowling choices leave no valid 20-over allocation")
+    return (*selected_overs, *completion)
 
 
 def _display_player_form(
@@ -183,15 +325,53 @@ def _interactive_innings(
     batting_order: list[str],
     batting_names: list[str],
     bowling_schedule: tuple[str, ...],
+    bowling_candidate_ids: list[str],
     bowling_names: dict[str, str],
     ratings: player_model.PlayerRatings,
     rng: Any,
     forecast_simulations: int,
 ) -> simulator.GameState | None:
     striker_index, non_striker_index, next_batter_index = 0, 1, 2
+    selected_overs: list[str] = []
     while not state.is_complete:
         current_batter = batting_order[striker_index]
-        current_bowler = bowling_schedule[state.legal_balls // 6]
+        over_index = state.legal_balls // 6
+        if over_index == len(selected_overs):
+            previous = selected_overs[-1] if selected_overs else None
+            counts = Counter(selected_overs)
+            available = [
+                player_id
+                for player_id in bowling_candidate_ids
+                if player_id != previous and counts[player_id] < 4
+            ]
+            while True:
+                print(f"\nChoose a bowler for over {over_index + 1}:")
+                for index, player_id in enumerate(available, start=1):
+                    print(
+                        f"  {index}. {bowling_names[player_id]} "
+                        f"({counts[player_id]} overs used)"
+                    )
+                try:
+                    choice = input("Bowler number: ").strip()
+                    if not choice.isdigit() or not 1 <= int(choice) <= len(available):
+                        raise ValueError("choose one of the listed bowler numbers")
+                    selected = available[int(choice) - 1]
+                    projected_schedule = _project_bowling_schedule(
+                        bowling_candidate_ids,
+                        bowling_schedule,
+                        selected_overs + [selected],
+                    )
+                    selected_overs.append(selected)
+                    break
+                except ValueError as exc:
+                    print(f"Invalid bowler choice: {exc}")
+        else:
+            projected_schedule = _project_bowling_schedule(
+                bowling_candidate_ids,
+                bowling_schedule,
+                selected_overs,
+            )
+        current_bowler = projected_schedule[over_index]
         over_label = f"{state.legal_balls // 6}.{state.legal_balls % 6}"
         remaining = (
             f", target {state.target_runs}"
@@ -214,7 +394,7 @@ def _interactive_innings(
                 bowling_team=bowling_team,
                 venue=venue,
                 batting_order=batting_order,
-                bowling_order=bowling_schedule,
+                bowling_order=projected_schedule,
                 player_ratings=ratings,
                 striker_index=striker_index,
                 non_striker_index=non_striker_index,
@@ -297,6 +477,8 @@ def _interactive_match(
     second_batting_order: list[str],
     first_bowling_schedule: tuple[str, ...],
     second_bowling_schedule: tuple[str, ...],
+    first_bowling_candidate_ids: list[str],
+    second_bowling_candidate_ids: list[str],
     first_batting_names: list[str],
     second_batting_names: list[str],
     first_bowling_names: dict[str, str],
@@ -309,7 +491,8 @@ def _interactive_match(
         "\nInteractive ball-by-ball mode: enter the observed delivery after "
         "each forecast. The fitted model is not retrained; each recorded ball "
         "updates the score, wickets, strike, and next-ball state used for "
-        "subsequent forecasts."
+        "subsequent forecasts. Select teams, batters, and bowlers by number "
+        "from the displayed lists; no player names need to be typed."
     )
     first = _interactive_innings(
         fitted_model,
@@ -320,6 +503,7 @@ def _interactive_match(
         batting_order=first_batting_order,
         batting_names=first_batting_names,
         bowling_schedule=first_bowling_schedule,
+        bowling_candidate_ids=first_bowling_candidate_ids,
         bowling_names=first_bowling_names,
         ratings=ratings,
         rng=rng,
@@ -341,6 +525,7 @@ def _interactive_match(
         batting_order=second_batting_order,
         batting_names=second_batting_names,
         bowling_schedule=second_bowling_schedule,
+        bowling_candidate_ids=second_bowling_candidate_ids,
         bowling_names=second_bowling_names,
         ratings=ratings,
         rng=rng,
@@ -419,11 +604,21 @@ def main() -> int:
         team1_bowlers = _bowling_candidates(
             lineups["team1"].get("bowlers"), "team1 bowlers", team1_batters
         )
+        team1_player_ids = _player_id_overrides(
+            lineups["team1"].get("player_ids"),
+            "team1 player_ids",
+            team1_batters,
+        )
         team2_batters = _required_names(
             lineups["team2"]["batting_order"], "team2 batting_order", 11
         )
         team2_bowlers = _bowling_candidates(
             lineups["team2"].get("bowlers"), "team2 bowlers", team2_batters
+        )
+        team2_player_ids = _player_id_overrides(
+            lineups["team2"].get("player_ids"),
+            "team2 player_ids",
+            team2_batters,
         )
     except (KeyError, TypeError, ValueError) as exc:
         parser.error(f"invalid fixture lineups: {exc}")
@@ -448,16 +643,32 @@ def main() -> int:
 
     try:
         team1_batter_ids = _resolve_player_ids(
-            team1_batters, deliveries, matches, as_of_date=match_date
+            team1_batters,
+            deliveries,
+            matches,
+            as_of_date=match_date,
+            player_id_overrides=team1_player_ids,
         )
         team1_bowler_ids = _resolve_player_ids(
-            team1_bowlers, deliveries, matches, as_of_date=match_date
+            team1_bowlers,
+            deliveries,
+            matches,
+            as_of_date=match_date,
+            player_id_overrides=team1_player_ids,
         )
         team2_batter_ids = _resolve_player_ids(
-            team2_batters, deliveries, matches, as_of_date=match_date
+            team2_batters,
+            deliveries,
+            matches,
+            as_of_date=match_date,
+            player_id_overrides=team2_player_ids,
         )
         team2_bowler_ids = _resolve_player_ids(
-            team2_bowlers, deliveries, matches, as_of_date=match_date
+            team2_bowlers,
+            deliveries,
+            matches,
+            as_of_date=match_date,
+            player_id_overrides=team2_player_ids,
         )
         ratings = player_model.build_player_ratings(
             deliveries,
@@ -478,6 +689,21 @@ def main() -> int:
         )
     except (KeyError, TypeError, ValueError) as exc:
         parser.error(f"could not build pre-match player form: {exc}")
+
+    if args.interactive:
+        batting_first = _prompt_batting_first(team1, team2)
+        original_team1_batters = team1_batters.copy()
+        original_team2_batters = team2_batters.copy()
+        team1_batters = _prompt_batting_order(team1, team1_batters)
+        team2_batters = _prompt_batting_order(team2, team2_batters)
+        team1_ids_by_name = dict(
+            zip(original_team1_batters, team1_batter_ids, strict=True)
+        )
+        team2_ids_by_name = dict(
+            zip(original_team2_batters, team2_batter_ids, strict=True)
+        )
+        team1_batter_ids = [team1_ids_by_name[name] for name in team1_batters]
+        team2_batter_ids = [team2_ids_by_name[name] for name in team2_batters]
 
     if batting_first == "team1":
         first_team, second_team = team1, team2
@@ -515,6 +741,12 @@ def main() -> int:
             ),
             second_bowling_schedule=(
                 team1_bowling_schedule if batting_first == "team1" else team2_bowling_schedule
+            ),
+            first_bowling_candidate_ids=(
+                team2_bowler_ids if batting_first == "team1" else team1_bowler_ids
+            ),
+            second_bowling_candidate_ids=(
+                team1_bowler_ids if batting_first == "team1" else team2_bowler_ids
             ),
             first_batting_names=first_batters,
             second_batting_names=second_batters,
