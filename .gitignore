@@ -1,0 +1,24 @@
+/data/
+/cricenv/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Generated model artifacts
+/results/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example

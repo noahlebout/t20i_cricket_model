@@ -1,0 +1,29 @@
+# Core data stack
+numpy>=1.26
+pandas>=2.1
+pyarrow>=14.0          # parquet read/write
+scipy>=1.11
+
+# Speed (inner simulation loop)
+numba>=0.59
+
+# Modelling / evaluation
+scikit-learn>=1.4      # calibration curves, Brier score, log loss, later: logistic regression
+statsmodels>=0.14      # optional: GLMs / shrinkage experiments
+
+# Plotting
+matplotlib>=3.8
+seaborn>=0.13
+
+# Notebooks
+jupyterlab>=4.0
+ipykernel>=6.29
+
+# Utilities
+requests>=2.31         # download_data.py
+tqdm>=4.66             # progress bars
+pyyaml>=6.0            # config.yaml
+
+# Testing / quality
+pytest>=8.0
+ruff>=0.4
